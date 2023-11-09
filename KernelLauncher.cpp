@@ -10,10 +10,17 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime_api.h>
 constexpr size_t NUM_WAVES = 4;
-constexpr size_t WAVEFRONT_SIZE = 64;
+constexpr size_t WAVEFRONT_SIZE = 32;
 constexpr auto WORKGROUP_SIZE = NUM_WAVES * WAVEFRONT_SIZE;
-constexpr size_t MT0 = 16;
-constexpr size_t MT1 = 256;
+constexpr size_t MT0 = 64;
+constexpr size_t MT1 = 64;
+
+#define DEBUG_LOG_ENABLE (1)
+#ifdef DEBUG_LOG_ENABLE
+#define DEBUG_LOG printf
+#else
+#define DEBUG_LOG(...)_
+#endif
 
 struct KernelArgs {
     template<typename T>
@@ -224,6 +231,58 @@ std::vector<DType> runCpuRef(
     return d1;
 }
 
+
+template<typename DType>
+std::vector<DType> runCpuSparseA(
+    const std::vector<DType> &cpuMatA,
+    const std::vector<DType> &cpuMatB,
+    const std::vector<DType> &cpuMatC,
+    const std::vector<uint8_t> &cpuMatMeta,
+    MatDesc aDesc,
+    MatDesc bDesc,
+    MatDesc cDesc,
+    MatDesc MetaDesc,
+    DType alpha,
+    DType beta
+    ) {
+
+    const size_t m = cDesc.shape[0];
+    const size_t n = cDesc.shape[1];
+    const size_t k = bDesc.shape[1];
+    std::vector<DType> d(m * n, DType(0));
+    MatDesc dDesc({m, n}, false);
+
+    for (size_t i = 0; i < m; ++i) {
+        for (size_t j = 0; j < n; ++j) {
+            DType tmp = getElement(cpuMatC.data(), cDesc, i, j) * beta;
+            for (size_t l = 0; l < k/8; ++l) {
+                //do 4 MACs
+                auto meta_val = getElement(cpuMatMeta.data(), MetaDesc, l, j);
+                size_t offset0 = (meta_val >> 0) & 0x03;
+                size_t offset1 = (meta_val >> 2) & 0x03;
+                size_t offset2 = (meta_val >> 4) & 0x03;
+                size_t offset3 = (meta_val >> 6) & 0x03;
+                auto a_val0 = getElement(cpuMatA.data(), aDesc, i, 4*l + 0);
+                auto b_val0 = getElement(cpuMatB.data(), bDesc, 8*l + offset0, j);
+                tmp += a_val0 * b_val0;
+                auto a_val1 = getElement(cpuMatA.data(), aDesc, i, 4*l + 1);
+                auto b_val1 = getElement(cpuMatB.data(), bDesc, 8*l + offset1, j);
+                tmp += a_val1 * b_val1;
+                auto a_val2 = getElement(cpuMatA.data(), aDesc, i, 4*l + 2);
+                auto b_val2 = getElement(cpuMatB.data(), bDesc, 8*l + 4 + offset2, j);
+                tmp += a_val2 * b_val2;
+                auto a_val3 = getElement(cpuMatA.data(), aDesc, i, 4*l + 3);
+                auto b_val3 = getElement(cpuMatB.data(), bDesc, 8*l + 4 + offset3, j);
+                tmp += a_val3 * b_val3;
+            }
+            tmp *= alpha;
+            setElement(tmp, d.data(), dDesc, i, j);
+        }
+    }
+
+    return d;
+}
+
 std::vector<float> runTensileRefImpl(const std::string &kernelPath, 
                                      size_t m, size_t n, size_t k,
                                      const std::vector<float> &cpuMatA,
@@ -296,54 +355,44 @@ std::vector<float> runTensileRefImpl(const std::string &kernelPath,
 }
 
 template<typename DataType, typename ScalarType>
-std::vector<float> launchFusedGemm(const std::string &kernelPath, hipStream_t stream, size_t m, size_t n, size_t k,
-                                   DataType *d, DataType *a, DataType *b, DataType *c, DataType *b1,
-                                   uint32_t staggerUIter,
-                                   ScalarType alpha, ScalarType beta, const ProfileSetting profile,
-                                   float &timeElapsedMs) {
+std::vector<float> launchSparseA(const std::string &kernelPath, hipStream_t stream, size_t m, size_t n, size_t k,
+                                 DataType *d, DataType *a, DataType *b, DataType *c, uint8_t *metadata,
+                                 uint32_t staggerUIter,
+                                 ScalarType alpha, ScalarType beta, const ProfileSetting profile,
+                                 float &timeElapsedMs) {
     hipModule_t module;
     auto err = hipModuleLoad(&module, kernelPath.c_str());
     assert(!err && "Unable to load module");
     hipFunction_t kernelFunc;
-    err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Alik_Bljk_HHS_BH_MT16x256x16_MI16x16x4x4_SN_K1_MIWT1_1");
+    err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HHS_BH_SPA_MT64x64x64_MI16x16x1_SN_GSU1_K1_MIWT2_2");
     assert(!err && "Unable to get function");
     KernelArgs kArgs;
     kArgs.addArg(m * n);
-    kArgs.addArg(m * k);
+    kArgs.addArg(m * k / 2); //Sparse A Matrix
     kArgs.addArg(k * n);
+    //kArgs.addArg(k * n); SizesSum0
+
     kArgs.addArg(d);
     kArgs.addArg(c);
     kArgs.addArg(a);
     kArgs.addArg(b);
+    kArgs.addArg(metadata);
+
+    kArgs.addArg<uint32_t>(m);
+    kArgs.addArg<uint32_t>(m * n);
+    kArgs.addArg<uint32_t>(m);
+    kArgs.addArg<uint32_t>(m * n);
+    kArgs.addArg<uint32_t>(m);       //strideA0
+    kArgs.addArg<uint32_t>(m * k/2); //strideA1
+    kArgs.addArg<uint32_t>(k);     
+    kArgs.addArg<uint32_t>(k * n);
+    kArgs.addArg<uint32_t>(k/4);       //strideMetadata0 
+    kArgs.addArg<uint32_t>(k/4 * n);   //strideMetadata1 
+
     kArgs.addArg(alpha);
     kArgs.addArg(beta);
-    kArgs.addArg<uint32_t>(m);
-    kArgs.addArg<uint32_t>(m * n);
-    kArgs.addArg<uint32_t>(m);
-    kArgs.addArg<uint32_t>(m * n);
-    kArgs.addArg<uint32_t>(m);
-    kArgs.addArg<uint32_t>(m * k);
-    kArgs.addArg<uint32_t>(k);
-    kArgs.addArg<uint32_t>(k * n);
-    kArgs.addArg<uint32_t>(m);
-    kArgs.addArg<uint32_t>(n);
-    kArgs.addArg<uint32_t>(1u);
-    kArgs.addArg<uint32_t>(k);
-    kArgs.addArg<uint32_t>(staggerUIter);
-    kArgs.addArg<uint32_t>(m / MT0);
-    kArgs.addArg<uint32_t>(n / MT1);
-    kArgs.addArg<uint32_t>(n / MT1);
-    kArgs.addArg<uint32_t>(n % MT1);
-    kArgs.addArg<uint32_t>(2147483649u);
-    kArgs.addArg(0u);
-    kArgs.addArg(0u);
-    kArgs.addArg(0u);
-    kArgs.addArg(0u);
-    kArgs.addArg(0u);
-    kArgs.addArg<uint64_t>(n * n);
-    kArgs.addArg<uint32_t>(n);
-    kArgs.addArg<uint32_t>(n * n);
-    kArgs.addArg(b1);
+    kArgs.addArg<uint32_t>(1);               //gsu
+
     kArgs.alignTo(8);
     size_t argSize = kArgs.data.size();
 
@@ -388,24 +437,37 @@ std::vector<float> launchFusedGemm(const std::string &kernelPath, hipStream_t st
     return toCpuArray<DataType, float>(d, m * n);
 }
 
+bool checkSparseASize(uint64_t m, uint64_t n, uint64_t k)
+{
+    return true;
+}
+
 int main(int argc, char **argv) {
+    DEBUG_LOG("Start....\n");
     auto err = hipInit(0);
     err = hipSetDevice(1);
+    DEBUG_LOG("hipSetDevice done....\n");
 
     // prepare resources
     const uint64_t m = std::atoi(argv[2]);//{128 * 1600};
     const uint64_t n = std::atoi(argv[3]);//{32};
     const uint64_t k = std::atoi(argv[4]);//{576};
     const size_t numOperations = 2 * m * n * k + m * n * n * 2;
+    //check size validation
+    if(!checkSparseASize(m,n,k))
+    {
+        std::cout<<"ERROR:checkSparseASize fail. "<<m<<","<<n<<","<<k<<std::endl; 
+        return 0;
+    }
     //std::cout << "# of operations: " << numOperations << '\n';
     std::random_device randDev;
     std::default_random_engine randEng(randDev());
     std::uniform_real_distribution<float> dist(-1.f, 1.f);
-    std::vector<float> cpuMatA(m * k, .2f);
-    std::vector<float> cpuMatB(k * n, .3f);
-    std::vector<float> cpuMatC(m * n, 1.f);
-    std::vector<float> cpuMatD(m * n, 1.f);
-    std::vector<float> cpuMatB1(n * n, 1.f);
+    std::vector<float>   cpuMatA(m * k/2, .2f);
+    std::vector<float>   cpuMatB(k * n, .3f);
+    std::vector<float>   cpuMatC(m * n, 1.f);
+    std::vector<float>   cpuMatD(m * n, 1.f);
+    std::vector<uint8_t> cpuMatMeta(n * k/8, 0);
     auto randInitMat = [&randEng, &dist] (std::vector<float> &mat) {
         std::transform(begin(mat), end(mat), begin(mat), [&randEng, &dist](float v) {
             return dist(randEng);
@@ -415,56 +477,56 @@ int main(int argc, char **argv) {
     //randInitMat(cpuMatA);
     // randInitMat(cpuMatB);
     // randInitMat(cpuMatC);
-    // randInitMat(cpuMatB1);
 
-    __half *matA = new __half[m * k];
+    __half *matA = new __half[m * k/2];
     __half *matB = new __half[k * n];
     __half *matC = new __half[m * n];
     __half *matD = new __half[m * n];
-    __half *matB1 = new __half[n * n];
+    uint8_t *matMeta = new uint8_t[n * k/4];
     __half *gpuMatA{};
     __half *gpuMatB{};
     __half *gpuMatC{};
     __half *gpuMatD{};
-    __half *gpuMatB1{};
-    err = hipMalloc(&gpuMatA, m * k * sizeof(__half));
+    uint8_t *gpuMatMeta{};
+    err = hipMalloc(&gpuMatA, m * k/2 * sizeof(__half));
     err = hipMalloc(&gpuMatB, k * n * sizeof(__half));
     err = hipMalloc(&gpuMatC, m * n * sizeof(__half));
     err = hipMalloc(&gpuMatD, m * n * sizeof(__half));
-    err = hipMalloc(&gpuMatB1, n * n * sizeof(__half));
+    err = hipMalloc(&gpuMatMeta, n * k/8 * sizeof(uint8_t));
     castArray(matA, cpuMatA.data(), cpuMatA.size());
     castArray(matB, cpuMatB.data(), cpuMatB.size());
     castArray(matC, cpuMatC.data(), cpuMatC.size());
-    castArray(matB1, cpuMatB1.data(), cpuMatB1.size());
+    castArray(matMeta, cpuMatMeta.data(), cpuMatMeta.size());
     castArray(matD, cpuMatD.data(), cpuMatD.size());
     err = hipMemcpyHtoD(gpuMatA, matA, cpuMatA.size() * sizeof(__half));
     err = hipMemcpyHtoD(gpuMatB, matB, cpuMatB.size() * sizeof(__half));
     err = hipMemcpyHtoD(gpuMatC, matC, cpuMatC.size() * sizeof(__half));
-    err = hipMemcpyHtoD(gpuMatB1, matB1, cpuMatB1.size() * sizeof(__half));
+    err = hipMemcpyHtoD(gpuMatMeta, matMeta, cpuMatMeta.size() * sizeof(uint8_t));
     err = hipMemcpyHtoD(gpuMatD, matD, cpuMatD.size() * sizeof(__half));
     float alpha = 1.f;
     float beta = 0.f;
     hipStream_t stream;
     err = hipStreamCreate(&stream);
     float fusedTimeMs{};
-    auto fusedResult = launchFusedGemm(argv[1], stream, m, n, k, gpuMatD, gpuMatA, gpuMatB, gpuMatC, gpuMatB1, 31, alpha, beta, ProfileSetting{"GEMM 0+1", 10}, fusedTimeMs);
-    std::cout << "Fused flops: " << (numOperations / (fusedTimeMs * 1e9)) << " TFlops\n";
+    auto fusedResult = launchSparseA(argv[1], stream, m, n, k, gpuMatD, gpuMatA, gpuMatB, gpuMatC, gpuMatMeta, 31, alpha, beta, ProfileSetting{"Sparse A", 10}, fusedTimeMs);
+    std::cout << "SparseA flops: " << (numOperations / (fusedTimeMs * 1e9)) << " TFlops\n";
     // free up all resources
     err = hipStreamDestroy(stream);
     err = hipFree(gpuMatA);
     err = hipFree(gpuMatB);
     err = hipFree(gpuMatC);
     err = hipFree(gpuMatD);
-    err = hipFree(gpuMatB1);
+    err = hipFree(gpuMatMeta);
     float tensileTimeMs{};
-    auto tensileRef = runTensileRefImpl("/workspace/projects/mi300/Tensile/KernelLauncher/ref2.co",
-                                        m, n, k, cpuMatA, cpuMatB, cpuMatC, cpuMatB1, tensileTimeMs);
+    //auto tensileRef = runTensileRefImpl("/workspace/projects/mi300/Tensile/KernelLauncher/ref2.co",
+    //                                    m, n, k, cpuMatA, cpuMatB, cpuMatC, cpuMatB1, tensileTimeMs);
 
-    auto cpuRef = runCpuRef(cpuMatA, cpuMatB, cpuMatC, cpuMatB1, MatDesc({m, k}, false), MatDesc({k, n}, false), MatDesc({m, n}, false), MatDesc({n, n}, false), alpha, beta);
+    //auto cpuRef = runCpuRef(cpuMatA, cpuMatB, cpuMatC, cpuMatB1, MatDesc({m, k}, false), MatDesc({k, n}, false), MatDesc({m, n}, false), MatDesc({n, n}, false), alpha, beta);
+    auto cpuRef = runCpuSparseA(cpuMatA, cpuMatB, cpuMatC, cpuMatMeta, MatDesc({m, k/2}, false), MatDesc({k, n}, false), MatDesc({m, n}, false), MatDesc({k/8, n}, false), alpha, beta);
 
-    for (size_t i = 0; i < tensileRef.size(); ++i) {
-        if (tensileRef[i] != fusedResult[i]) {
-            std::cout << i << ": " << tensileRef[i] << " != " << fusedResult[i] << ", " << cpuRef[i] << '\n';
+    for (size_t i = 0; i < cpuRef.size(); ++i) {
+        if (cpuRef[i] != fusedResult[i]) {
+            std::cout << i << ": " << cpuRef[i] << " != " << fusedResult[i] << '\n';
             break;
         }
     }
@@ -478,7 +540,7 @@ int main(int argc, char **argv) {
     delete [] matB;
     delete [] matC;
     delete [] matD;
-    delete [] matB1;
+    delete [] matMeta;
 
     return 0;
 }
