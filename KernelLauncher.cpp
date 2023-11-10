@@ -472,7 +472,7 @@ int main(int argc, char **argv) {
         std::transform(begin(mat), end(mat), begin(mat), [&randEng, &dist](float v) {
             return dist(randEng);
         });
-        };
+    };
 
     //randInitMat(cpuMatA);
     // randInitMat(cpuMatB);
@@ -493,21 +493,25 @@ int main(int argc, char **argv) {
     err = hipMalloc(&gpuMatC, m * n * sizeof(__half));
     err = hipMalloc(&gpuMatD, m * n * sizeof(__half));
     err = hipMalloc(&gpuMatMeta, n * k/8 * sizeof(uint8_t));
+    DEBUG_LOG("hipMalloc done....\n");
     castArray(matA, cpuMatA.data(), cpuMatA.size());
     castArray(matB, cpuMatB.data(), cpuMatB.size());
     castArray(matC, cpuMatC.data(), cpuMatC.size());
     castArray(matMeta, cpuMatMeta.data(), cpuMatMeta.size());
     castArray(matD, cpuMatD.data(), cpuMatD.size());
+    DEBUG_LOG("castArray done....\n");
     err = hipMemcpyHtoD(gpuMatA, matA, cpuMatA.size() * sizeof(__half));
     err = hipMemcpyHtoD(gpuMatB, matB, cpuMatB.size() * sizeof(__half));
     err = hipMemcpyHtoD(gpuMatC, matC, cpuMatC.size() * sizeof(__half));
     err = hipMemcpyHtoD(gpuMatMeta, matMeta, cpuMatMeta.size() * sizeof(uint8_t));
     err = hipMemcpyHtoD(gpuMatD, matD, cpuMatD.size() * sizeof(__half));
+    DEBUG_LOG("hipMemcpyHtoD done....\n");
     float alpha = 1.f;
     float beta = 0.f;
     hipStream_t stream;
     err = hipStreamCreate(&stream);
     float fusedTimeMs{};
+    DEBUG_LOG("kernel path : %s\n",argv[1]);
     auto fusedResult = launchSparseA(argv[1], stream, m, n, k, gpuMatD, gpuMatA, gpuMatB, gpuMatC, gpuMatMeta, 31, alpha, beta, ProfileSetting{"Sparse A", 10}, fusedTimeMs);
     std::cout << "SparseA flops: " << (numOperations / (fusedTimeMs * 1e9)) << " TFlops\n";
     // free up all resources
