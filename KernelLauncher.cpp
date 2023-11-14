@@ -51,13 +51,19 @@ struct KernelArgs {
 
 template<typename Src, typename Dst>
 void castArray(Dst *dst, const Src *src, size_t numElements) {
-    std::transform(src, src + numElements, dst, [](const Src &src) {
-        return Dst(src);
-    });
+    DEBUG_LOG("[castArray] numElements = %d\n",numElements);
+    //std::transform(src, src + numElements, dst, [](const Src &src) {
+    //    return Dst(src);
+    //});
+    for(int i=0;i<numElements;i++)
+    {
+        dst[i] = static_cast<Dst>(src[i]);
+    }
 }
 
 template<typename Src, typename Dst>
 std::vector<Dst> toCpuArray(Src *src, size_t numElements) {
+    DEBUG_LOG("[toCpuArray] numElements = %d\n",numElements);
     std::vector<Src> buf(numElements);
     hipMemcpyDtoH(buf.data(), src, numElements * sizeof(Src));
     std::vector<Dst> ret(numElements);
@@ -370,7 +376,7 @@ std::vector<float> launchSparseA(const std::string &kernelPath, hipStream_t stre
     kArgs.addArg(m * n);
     kArgs.addArg(m * k / 2); //Sparse A Matrix
     kArgs.addArg(k * n);
-    //kArgs.addArg(k * n); SizesSum0
+    kArgs.addArg(k); //SizesSum0
 
     kArgs.addArg(d);
     kArgs.addArg(c);
@@ -432,9 +438,12 @@ std::vector<float> launchSparseA(const std::string &kernelPath, hipStream_t stre
     }
 
     timeElapsedMs = totalTime / profile.numRuns;
-    //std::cout << profile.opName << " time elapsed: " << totalTime / profile.numRuns << " ms\n";
+    std::cout << profile.opName << " time elapsed: " << totalTime / profile.numRuns << " ms\n";
     hipModuleUnload(module);
-    return toCpuArray<DataType, float>(d, m * n);
+    std::cout <<"....hipModuleUnload done"<<std::endl;
+    auto ret = toCpuArray<DataType, float>(d, m * n);
+    std::cout <<"....toCpuArray done"<<std::endl;
+    return ret;
 }
 
 bool checkSparseASize(uint64_t m, uint64_t n, uint64_t k)
@@ -459,7 +468,7 @@ int main(int argc, char **argv) {
         std::cout<<"ERROR:checkSparseASize fail. "<<m<<","<<n<<","<<k<<std::endl; 
         return 0;
     }
-    //std::cout << "# of operations: " << numOperations << '\n';
+    std::cout << "# of operations: " << numOperations << '\n';
     std::random_device randDev;
     std::default_random_engine randEng(randDev());
     std::uniform_real_distribution<float> dist(-1.f, 1.f);
@@ -512,7 +521,7 @@ int main(int argc, char **argv) {
     err = hipStreamCreate(&stream);
     float fusedTimeMs{};
     DEBUG_LOG("kernel path : %s\n",argv[1]);
-    auto fusedResult = launchSparseA(argv[1], stream, m, n, k, gpuMatD, gpuMatA, gpuMatB, gpuMatC, gpuMatMeta, 31, alpha, beta, ProfileSetting{"Sparse A", 10}, fusedTimeMs);
+    auto fusedResult = launchSparseA(argv[1], stream, m, n, k, gpuMatD, gpuMatA, gpuMatB, gpuMatC, gpuMatMeta, 31, alpha, beta, ProfileSetting{"Sparse A", 1}, fusedTimeMs);
     std::cout << "SparseA flops: " << (numOperations / (fusedTimeMs * 1e9)) << " TFlops\n";
     // free up all resources
     err = hipStreamDestroy(stream);
