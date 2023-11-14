@@ -1,3 +1,4 @@
+#include <sys/stat.h>
 #include <cassert>
 #include <cstring>
 #include <iostream>
@@ -360,6 +361,11 @@ std::vector<float> runTensileRefImpl(const std::string &kernelPath,
     return ret;
 }
 
+inline bool exist_test (const std::string& name) {
+  struct stat buffer;   
+  return (stat (name.c_str(), &buffer) == 0); 
+}
+
 template<typename DataType, typename ScalarType>
 std::vector<float> launchSparseA(const std::string &kernelPath, hipStream_t stream, size_t m, size_t n, size_t k,
                                  DataType *d, DataType *a, DataType *b, DataType *c, uint8_t *metadata,
@@ -367,80 +373,87 @@ std::vector<float> launchSparseA(const std::string &kernelPath, hipStream_t stre
                                  ScalarType alpha, ScalarType beta, const ProfileSetting profile,
                                  float &timeElapsedMs) {
     hipModule_t module;
-    auto err = hipModuleLoad(&module, kernelPath.c_str());
-    assert(!err && "Unable to load module");
-    hipFunction_t kernelFunc;
-    err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HHS_BH_SPA_MT64x64x64_MI16x16x1_SN_GSU1_K1_MIWT2_2");
-    assert(!err && "Unable to get function");
-    KernelArgs kArgs;
-    kArgs.addArg(m * n);
-    kArgs.addArg(m * k / 2); //Sparse A Matrix
-    kArgs.addArg(k * n);
-    kArgs.addArg(k); //SizesSum0
+    if(exist_test(kernelPath))
+    {
+        auto err = hipModuleLoad(&module, kernelPath.c_str());
+        assert(!err && "Unable to load module");
+        hipFunction_t kernelFunc;
+        err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HHS_BH_SPA_MT64x64x64_MI16x16x1_SN_GSU1_K1_MIWT2_2");
+        assert(!err && "Unable to get function");
+        KernelArgs kArgs;
+        kArgs.addArg(m * n);
+        kArgs.addArg(m * k / 2); //Sparse A Matrix
+        kArgs.addArg(k * n);
+        kArgs.addArg(k); //SizesSum0
 
-    kArgs.addArg(d);
-    kArgs.addArg(c);
-    kArgs.addArg(a);
-    kArgs.addArg(b);
-    kArgs.addArg(metadata);
+        kArgs.addArg(d);
+        kArgs.addArg(c);
+        kArgs.addArg(a);
+        kArgs.addArg(b);
+        kArgs.addArg(metadata);
 
-    kArgs.addArg<uint32_t>(m);
-    kArgs.addArg<uint32_t>(m * n);
-    kArgs.addArg<uint32_t>(m);
-    kArgs.addArg<uint32_t>(m * n);
-    kArgs.addArg<uint32_t>(m);       //strideA0
-    kArgs.addArg<uint32_t>(m * k/2); //strideA1
-    kArgs.addArg<uint32_t>(k);     
-    kArgs.addArg<uint32_t>(k * n);
-    kArgs.addArg<uint32_t>(k/4);       //strideMetadata0 
-    kArgs.addArg<uint32_t>(k/4 * n);   //strideMetadata1 
+        kArgs.addArg<uint32_t>(m);
+        kArgs.addArg<uint32_t>(m * n);
+        kArgs.addArg<uint32_t>(m);
+        kArgs.addArg<uint32_t>(m * n);
+        kArgs.addArg<uint32_t>(m);       //strideA0
+        kArgs.addArg<uint32_t>(m * k/2); //strideA1
+        kArgs.addArg<uint32_t>(k);     
+        kArgs.addArg<uint32_t>(k * n);
+        kArgs.addArg<uint32_t>(k/4);       //strideMetadata0 
+        kArgs.addArg<uint32_t>(k/4 * n);   //strideMetadata1 
 
-    kArgs.addArg(alpha);
-    kArgs.addArg(beta);
-    kArgs.addArg<uint32_t>(1);               //gsu
+        kArgs.addArg(alpha);
+        kArgs.addArg(beta);
+        kArgs.addArg<uint32_t>(1);               //gsu
 
-    kArgs.alignTo(8);
-    size_t argSize = kArgs.data.size();
+        kArgs.alignTo(8);
+        size_t argSize = kArgs.data.size();
 
-    void *launchArgs[] = {
-        HIP_LAUNCH_PARAM_BUFFER_POINTER,
-        kArgs.rawData(),
-        HIP_LAUNCH_PARAM_BUFFER_SIZE,
-        &argSize,
-        HIP_LAUNCH_PARAM_END
-    };
+        void *launchArgs[] = {
+            HIP_LAUNCH_PARAM_BUFFER_POINTER,
+            kArgs.rawData(),
+            HIP_LAUNCH_PARAM_BUFFER_SIZE,
+            &argSize,
+            HIP_LAUNCH_PARAM_END
+        };
 
-    float totalTime{};
+        float totalTime{};
 
-    for (size_t i = 0; i < profile.numRuns; ++i) {
-        hipEvent_t endEvt;
-        hipEvent_t startEvt;
-        err = hipEventCreate(&endEvt);
-        err = hipEventCreate(&startEvt);
-        err = hipEventRecord(startEvt, stream);
-        err = hipExtModuleLaunchKernel(kernelFunc, 
-                                    WORKGROUP_SIZE * m / MT0, 1, 1,
-                                    WORKGROUP_SIZE, 1, 1,
-                                    8704,
-                                    stream,
-                                    nullptr,
-                                    &launchArgs[0],
-                                    nullptr,
-                                    nullptr);
-        err = hipEventRecord(endEvt, stream);
-        err = hipEventSynchronize(endEvt);
-        err = hipStreamSynchronize(stream);
-        float t{};
-        err = hipEventElapsedTime(&t, startEvt, endEvt);
-        err = hipEventDestroy(endEvt);
-        err = hipEventDestroy(startEvt);
-        totalTime += t;
+        for (size_t i = 0; i < profile.numRuns; ++i) {
+            hipEvent_t endEvt;
+            hipEvent_t startEvt;
+            err = hipEventCreate(&endEvt);
+            err = hipEventCreate(&startEvt);
+            err = hipEventRecord(startEvt, stream);
+            err = hipExtModuleLaunchKernel(kernelFunc, 
+                                        WORKGROUP_SIZE * m / MT0, 1, 1,
+                                        WORKGROUP_SIZE, 1, 1,
+                                        8704,
+                                        stream,
+                                        nullptr,
+                                        &launchArgs[0],
+                                        nullptr,
+                                        nullptr);
+            err = hipEventRecord(endEvt, stream);
+            err = hipEventSynchronize(endEvt);
+            err = hipStreamSynchronize(stream);
+            float t{};
+            err = hipEventElapsedTime(&t, startEvt, endEvt);
+            err = hipEventDestroy(endEvt);
+            err = hipEventDestroy(startEvt);
+            totalTime += t;
+        }
+        timeElapsedMs = totalTime / profile.numRuns;
+        std::cout << profile.opName << " time elapsed: " << totalTime / profile.numRuns << " ms\n";
+        hipModuleUnload(module);
+        std::cout <<"....hipModuleUnload done"<<std::endl;
+    }
+    else
+    {
+        std::cout <<"kernel path doesn't exist. Skip running kernel."<<std::endl;
     }
 
-    timeElapsedMs = totalTime / profile.numRuns;
-    std::cout << profile.opName << " time elapsed: " << totalTime / profile.numRuns << " ms\n";
-    hipModuleUnload(module);
-    std::cout <<"....hipModuleUnload done"<<std::endl;
     auto ret = toCpuArray<DataType, float>(d, m * n);
     std::cout <<"....toCpuArray done"<<std::endl;
     return ret;
@@ -521,7 +534,7 @@ int main(int argc, char **argv) {
     err = hipStreamCreate(&stream);
     float fusedTimeMs{};
     DEBUG_LOG("kernel path : %s\n",argv[1]);
-    auto fusedResult = launchSparseA(argv[1], stream, m, n, k, gpuMatD, gpuMatA, gpuMatB, gpuMatC, gpuMatMeta, 31, alpha, beta, ProfileSetting{"Sparse A", 1}, fusedTimeMs);
+    auto fusedResult = launchSparseA(argv[1], stream, m, n, k, gpuMatD, gpuMatA, gpuMatB, gpuMatC, gpuMatMeta, 31, alpha, beta, ProfileSetting{"Sparse A", 0}, fusedTimeMs);
     std::cout << "SparseA flops: " << (numOperations / (fusedTimeMs * 1e9)) << " TFlops\n";
     // free up all resources
     err = hipStreamDestroy(stream);
