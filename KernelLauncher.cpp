@@ -264,7 +264,7 @@ std::vector<DType> runCpuSparseA(
             DType tmp = getElement(cpuMatC.data(), cDesc, i, j) * beta;
             for (size_t l = 0; l < k/8; ++l) {
                 //do 4 MACs
-                auto meta_val = getElement(cpuMatMeta.data(), MetaDesc, l, j);
+                auto meta_val = getElement(cpuMatMeta.data(), MetaDesc, i, l);
                 size_t offset0 = (meta_val >> 0) & 0x03;
                 size_t offset1 = (meta_val >> 2) & 0x03;
                 size_t offset2 = (meta_val >> 4) & 0x03;
@@ -381,10 +381,10 @@ std::vector<float> launchSparseA(const std::string &kernelPath, hipStream_t stre
         err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HHS_BH_SPA_MT64x64x64_MI16x16x1_SN_GSU1_K1_MIWT2_2");
         assert(!err && "Unable to get function");
         KernelArgs kArgs;
-        kArgs.addArg(m * n);
-        kArgs.addArg(m * k / 2); //Sparse A Matrix
-        kArgs.addArg(k * n);
-        kArgs.addArg(k); //SizesSum0
+        kArgs.addArg(m);
+        kArgs.addArg(n);
+        kArgs.addArg(1);
+        kArgs.addArg(k);
 
         kArgs.addArg(d);
         kArgs.addArg(c);
@@ -401,7 +401,7 @@ std::vector<float> launchSparseA(const std::string &kernelPath, hipStream_t stre
         kArgs.addArg<uint32_t>(k);     
         kArgs.addArg<uint32_t>(k * n);
         kArgs.addArg<uint32_t>(k/4);       //strideMetadata0 
-        kArgs.addArg<uint32_t>(k/4 * n);   //strideMetadata1 
+        kArgs.addArg<uint32_t>(k/4 * m);   //strideMetadata1 
 
         kArgs.addArg(alpha);
         kArgs.addArg(beta);
@@ -429,7 +429,7 @@ std::vector<float> launchSparseA(const std::string &kernelPath, hipStream_t stre
             err = hipExtModuleLaunchKernel(kernelFunc, 
                                         WORKGROUP_SIZE * m / MT0, 1, 1,
                                         WORKGROUP_SIZE, 1, 1,
-                                        8704,
+                                        31744,
                                         stream,
                                         nullptr,
                                         &launchArgs[0],
@@ -504,7 +504,7 @@ int main(int argc, char **argv) {
     __half *matB = new __half[k * n];
     __half *matC = new __half[m * n];
     __half *matD = new __half[m * n];
-    uint8_t *matMeta = new uint8_t[n * k/4];
+    uint8_t *matMeta = new uint8_t[m * k/4];
     __half *gpuMatA{};
     __half *gpuMatB{};
     __half *gpuMatC{};
@@ -514,7 +514,7 @@ int main(int argc, char **argv) {
     err = hipMalloc(&gpuMatB, k * n * sizeof(__half));
     err = hipMalloc(&gpuMatC, m * n * sizeof(__half));
     err = hipMalloc(&gpuMatD, m * n * sizeof(__half));
-    err = hipMalloc(&gpuMatMeta, n * k/8 * sizeof(uint8_t));
+    err = hipMalloc(&gpuMatMeta, m * k/8 * sizeof(uint8_t));
     DEBUG_LOG("hipMalloc done....\n");
     castArray(matA, cpuMatA.data(), cpuMatA.size());
     castArray(matB, cpuMatB.data(), cpuMatB.size());
@@ -534,7 +534,7 @@ int main(int argc, char **argv) {
     err = hipStreamCreate(&stream);
     float fusedTimeMs{};
     DEBUG_LOG("kernel path : %s\n",argv[1]);
-    auto fusedResult = launchSparseA(argv[1], stream, m, n, k, gpuMatD, gpuMatA, gpuMatB, gpuMatC, gpuMatMeta, 31, alpha, beta, ProfileSetting{"Sparse A", 0}, fusedTimeMs);
+    auto fusedResult = launchSparseA(argv[1], stream, m, n, k, gpuMatD, gpuMatA, gpuMatB, gpuMatC, gpuMatMeta, 31, alpha, beta, ProfileSetting{"Sparse A", 1}, fusedTimeMs);
     std::cout << "SparseA flops: " << (numOperations / (fusedTimeMs * 1e9)) << " TFlops\n";
     // free up all resources
     err = hipStreamDestroy(stream);
@@ -548,8 +548,9 @@ int main(int argc, char **argv) {
     //                                    m, n, k, cpuMatA, cpuMatB, cpuMatC, cpuMatB1, tensileTimeMs);
 
     //auto cpuRef = runCpuRef(cpuMatA, cpuMatB, cpuMatC, cpuMatB1, MatDesc({m, k}, false), MatDesc({k, n}, false), MatDesc({m, n}, false), MatDesc({n, n}, false), alpha, beta);
+    DEBUG_LOG("runCpuSparseA start\n");
     auto cpuRef = runCpuSparseA(cpuMatA, cpuMatB, cpuMatC, cpuMatMeta, MatDesc({m, k/2}, false), MatDesc({k, n}, false), MatDesc({m, n}, false), MatDesc({k/8, n}, false), alpha, beta);
-
+    DEBUG_LOG("runCpuSparseA end\n");
     for (size_t i = 0; i < cpuRef.size(); ++i) {
         if (cpuRef[i] != fusedResult[i]) {
             std::cout << i << ": " << cpuRef[i] << " != " << fusedResult[i] << '\n';
