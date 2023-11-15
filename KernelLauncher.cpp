@@ -50,6 +50,33 @@ struct KernelArgs {
     std::vector<uint8_t> data;
 };
 
+float cpu_half2float(unsigned short x)
+{
+    unsigned sign = ((x >> 15) & 1);
+    unsigned exponent = ((x >> 10) & 0x1f);
+    unsigned mantissa = ((x & 0x3ff) << 13);
+    if (exponent == 0x1f) {  /* NaN or Inf */
+        mantissa = (mantissa ? (sign = 0, 0x7fffff) : 0);
+        exponent = 0xff;
+    } else if (!exponent) {  /* Denorm or Zero */
+        if (mantissa) {
+            unsigned int msb;
+            exponent = 0x71;
+            do {
+                msb = (mantissa & 0x400000);
+                mantissa <<= 1;  /* normalize */
+                --exponent;
+            } while (!msb);
+            mantissa &= 0x7fffff;  /* 1.mantissa is implicit */
+        }
+    } else {
+        exponent += 0x70;
+    }
+    int temp = ((sign << 31) | (exponent << 23) | mantissa);
+
+    return *((float*)((void*)&temp));
+}
+
 template<typename Src, typename Dst>
 void castArray(Dst *dst, const Src *src, size_t numElements) {
     DEBUG_LOG("[castArray] numElements = %d\n",numElements);
@@ -454,8 +481,17 @@ std::vector<float> launchSparseA(const std::string &kernelPath, hipStream_t stre
         std::cout <<"kernel path doesn't exist. Skip running kernel."<<std::endl;
     }
 
-    auto ret = toCpuArray<DataType, float>(d, m * n);
-    std::cout <<"....toCpuArray done"<<std::endl;
+    std::vector<uint16_t> buf(m * n);
+    hipMemcpyDtoH(buf.data(), d, m * n * sizeof(__half));
+    std::vector<float> ret(m * n);
+    for(int i=0;i<m * n;i++)
+    {
+        ret[i] = cpu_half2float(buf[i]);
+    }
+    std::cout <<"....cpu_half2float done"<<std::endl;
+
+    //auto ret = toCpuArray<DataType, float>(d, m * n);
+    //std::cout <<"....toCpuArray done"<<std::endl;
     return ret;
 }
 
