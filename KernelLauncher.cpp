@@ -392,10 +392,10 @@ inline bool exist_test (const std::string& name) {
   struct stat buffer;   
   return (stat (name.c_str(), &buffer) == 0); 
 }
-
-template<typename DataType, typename ScalarType>
-std::vector<float> launchSparseA(const std::string &kernelPath, hipStream_t stream, size_t m, size_t n, size_t k,
-                                 DataType *d, DataType *a, DataType *b, DataType *c, uint8_t *metadata,
+static std::string kernelName;
+template<typename SrcDataType,typename DestDataType, typename ScalarType>
+std::vector<DestDataType> launchSparseA(const std::string &kernelPath, hipStream_t stream, size_t m, size_t n, size_t k,
+                                 DestDataType *d, SrcDataType *a, SrcDataType *b, DestDataType *c, uint8_t *metadata,
                                  uint32_t staggerUIter,
                                  ScalarType alpha, ScalarType beta, const ProfileSetting profile,
                                  float &timeElapsedMs) {
@@ -405,7 +405,8 @@ std::vector<float> launchSparseA(const std::string &kernelPath, hipStream_t stre
         auto err = hipModuleLoad(&module, kernelPath.c_str());
         assert(!err && "Unable to load module");
         hipFunction_t kernelFunc;
-        err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HHS_BH_SPA_MT64x64x64_MI16x16x1_SN_GSU1_K1_MIWT2_2");
+        //err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HHS_BH_SPA_MT64x64x64_MI16x16x1_SN_GSU1_K1_MIWT2_2");
+        err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HSS_BH_SPA_MT16x16x64_MI16x16x1_SN_GSU1_K1_MIWT1_1");
         assert(!err && "Unable to get function");
         KernelArgs kArgs;
         kArgs.addArg(m);
@@ -481,18 +482,19 @@ std::vector<float> launchSparseA(const std::string &kernelPath, hipStream_t stre
         std::cout <<"kernel path doesn't exist. Skip running kernel."<<std::endl;
     }
 
-    std::vector<uint16_t> buf(m * n);
+    std::vector<DestDataType> buf(m * n);
     hipMemcpyDtoH(buf.data(), d, m * n * sizeof(__half));
-    std::vector<float> ret(m * n);
-    for(int i=0;i<m * n;i++)
-    {
-        ret[i] = cpu_half2float(buf[i]);
-    }
-    std::cout <<"....cpu_half2float done"<<std::endl;
+    return buf;
+    // std::vector<float> ret(m * n);
+    // for(int i=0;i<m * n;i++)
+    // {
+    //     ret[i] = cpu_half2float(buf[i]);
+    // }
+    // std::cout <<"....cpu_half2float done"<<std::endl;
 
     //auto ret = toCpuArray<DataType, float>(d, m * n);
     //std::cout <<"....toCpuArray done"<<std::endl;
-    return ret;
+    //return ret;
 }
 
 bool checkSparseASize(uint64_t m, uint64_t n, uint64_t k)
@@ -506,6 +508,8 @@ int main(int argc, char **argv) {
     err = hipSetDevice(1);
     DEBUG_LOG("hipSetDevice done....\n");
 
+    using DestDataType = float;
+    using SrcDataType = __half;
     // prepare resources
     const uint64_t m = std::atoi(argv[2]);//{128 * 1600};
     const uint64_t n = std::atoi(argv[3]);//{32};
@@ -536,20 +540,20 @@ int main(int argc, char **argv) {
     // randInitMat(cpuMatB);
     // randInitMat(cpuMatC);
 
-    __half *matA = new __half[m * k/2];
-    __half *matB = new __half[k * n];
-    __half *matC = new __half[m * n];
-    __half *matD = new __half[m * n];
+    SrcDataType *matA = new SrcDataType[m * k/2];
+    SrcDataType *matB = new SrcDataType[k * n];
+    DestDataType *matC = new DestDataType[m * n];
+    DestDataType *matD = new DestDataType[m * n];
     uint8_t *matMeta = new uint8_t[m * k/4];
-    __half *gpuMatA{};
-    __half *gpuMatB{};
-    __half *gpuMatC{};
-    __half *gpuMatD{};
+    SrcDataType *gpuMatA{};
+    SrcDataType *gpuMatB{};
+    DestDataType *gpuMatC{};
+    DestDataType *gpuMatD{};
     uint8_t *gpuMatMeta{};
-    err = hipMalloc(&gpuMatA, m * k/2 * sizeof(__half));
-    err = hipMalloc(&gpuMatB, k * n * sizeof(__half));
-    err = hipMalloc(&gpuMatC, m * n * sizeof(__half));
-    err = hipMalloc(&gpuMatD, m * n * sizeof(__half));
+    err = hipMalloc(&gpuMatA, m * k/2 * sizeof(SrcDataType));
+    err = hipMalloc(&gpuMatB, k * n * sizeof(SrcDataType));
+    err = hipMalloc(&gpuMatC, m * n * sizeof(DestDataType));
+    err = hipMalloc(&gpuMatD, m * n * sizeof(DestDataType));
     err = hipMalloc(&gpuMatMeta, m * k/8 * sizeof(uint8_t));
     DEBUG_LOG("hipMalloc done....\n");
     castArray(matA, cpuMatA.data(), cpuMatA.size());
@@ -558,11 +562,11 @@ int main(int argc, char **argv) {
     castArray(matMeta, cpuMatMeta.data(), cpuMatMeta.size());
     castArray(matD, cpuMatD.data(), cpuMatD.size());
     DEBUG_LOG("castArray done....\n");
-    err = hipMemcpyHtoD(gpuMatA, matA, cpuMatA.size() * sizeof(__half));
-    err = hipMemcpyHtoD(gpuMatB, matB, cpuMatB.size() * sizeof(__half));
-    err = hipMemcpyHtoD(gpuMatC, matC, cpuMatC.size() * sizeof(__half));
+    err = hipMemcpyHtoD(gpuMatA, matA, cpuMatA.size() * sizeof(SrcDataType));
+    err = hipMemcpyHtoD(gpuMatB, matB, cpuMatB.size() * sizeof(SrcDataType));
+    err = hipMemcpyHtoD(gpuMatC, matC, cpuMatC.size() * sizeof(DestDataType));
     err = hipMemcpyHtoD(gpuMatMeta, matMeta, cpuMatMeta.size() * sizeof(uint8_t));
-    err = hipMemcpyHtoD(gpuMatD, matD, cpuMatD.size() * sizeof(__half));
+    err = hipMemcpyHtoD(gpuMatD, matD, cpuMatD.size() * sizeof(DestDataType));
     DEBUG_LOG("hipMemcpyHtoD done....\n");
     float alpha = 1.f;
     float beta = 0.f;
@@ -587,9 +591,12 @@ int main(int argc, char **argv) {
     DEBUG_LOG("runCpuSparseA start\n");
     auto cpuRef = runCpuSparseA(cpuMatA, cpuMatB, cpuMatC, cpuMatMeta, MatDesc({m, k/2}, false), MatDesc({k, n}, false), MatDesc({m, n}, false), MatDesc({k/8, n}, false), alpha, beta);
     DEBUG_LOG("runCpuSparseA end\n");
+
     for (size_t i = 0; i < cpuRef.size(); ++i) {
-        if (cpuRef[i] != fusedResult[i]) {
-            std::cout << i << ": " << cpuRef[i] << " != " << fusedResult[i] << '\n';
+        auto cpuVal = (static_cast<float>(cpuRef[i]));
+        auto gpuVal = (static_cast<float>(fusedResult[i]));
+        if (cpuVal != gpuVal) {
+            std::cout << i << ": " << cpuVal << " != " << gpuVal << '\n';
             break;
         }
     }
