@@ -483,7 +483,7 @@ std::vector<DestDataType> launchSparseA(const std::string &kernelPath, hipStream
     }
 
     std::vector<DestDataType> buf(m * n);
-    hipMemcpyDtoH(buf.data(), d, m * n * sizeof(__half));
+    hipMemcpyDtoH(buf.data(), d, m * n * sizeof(DestDataType));
     return buf;
     // std::vector<float> ret(m * n);
     // for(int i=0;i<m * n;i++)
