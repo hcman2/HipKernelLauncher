@@ -536,6 +536,7 @@ int main(int argc, char **argv) {
         });
     };
 
+    
     //randInitMat(cpuMatA);
     // randInitMat(cpuMatB);
     // randInitMat(cpuMatC);
@@ -557,6 +558,7 @@ int main(int argc, char **argv) {
     err = hipMalloc(&gpuMatMeta, m * k/8 * sizeof(uint8_t));
     DEBUG_LOG("hipMalloc done....\n");
     castArray(matA, cpuMatA.data(), cpuMatA.size());
+    DEBUG_LOG("matA[0] = %d\n", matA[0]);
     castArray(matB, cpuMatB.data(), cpuMatB.size());
     castArray(matC, cpuMatC.data(), cpuMatC.size());
     castArray(matMeta, cpuMatMeta.data(), cpuMatMeta.size());
