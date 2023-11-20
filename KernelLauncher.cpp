@@ -10,17 +10,30 @@
 #include <hip/hip_ext.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime_api.h>
-constexpr size_t NUM_WAVES = 4;
+constexpr size_t NUM_WAVES = 1;
 constexpr size_t WAVEFRONT_SIZE = 32;
 constexpr auto WORKGROUP_SIZE = NUM_WAVES * WAVEFRONT_SIZE;
-constexpr size_t MT0 = 64;
-constexpr size_t MT1 = 64;
+constexpr size_t MT0 = 16;
+constexpr size_t MT1 = 16;
 
 #define DEBUG_LOG_ENABLE (1)
 #ifdef DEBUG_LOG_ENABLE
 #define DEBUG_LOG printf
 #else
 #define DEBUG_LOG(...)_
+#endif
+
+#if 1
+#define CHECK(cmd) \
+{\
+    hipError_t error  = cmd;\
+    if (error != hipSuccess) { \
+        fprintf(stderr, "error: '%s'(%d) at %s:%d\n", hipGetErrorString(error), error,__FILE__, __LINE__); \
+        exit(EXIT_FAILURE);\
+          }\
+}
+#else
+#define CHECK(cmd)
 #endif
 
 struct KernelArgs {
@@ -45,6 +58,20 @@ struct KernelArgs {
 
     void *rawData() {
         return data.data();
+    }
+
+    void printArg() {
+        int i=0;
+        DEBUG_LOG("Kernel Argument size is %d bytes\n",data.size());
+        for(auto d:data)
+        {
+            if((i%4)==0) DEBUG_LOG("Address %08x:",i);
+            i++;
+            DEBUG_LOG("%2x ",d);
+            if((i%4)==0){
+                DEBUG_LOG("\n");
+            }
+        }
     }
 
     std::vector<uint8_t> data;
@@ -162,7 +189,7 @@ float launchGemmKernel(hipFunction_t func, hipStream_t stream, size_t m, size_t 
         err = hipEventCreate(&endEvt);
         err = hipEventRecord(startEvt, stream);
         err = hipExtModuleLaunchKernel(func,
-                                    WORKGROUP_SIZE * m / MT0, 1, 1,
+                                    WORKGROUP_SIZE * m / MT0, n / MT1, 1,
                                     WORKGROUP_SIZE, 1, 1,
                                     8704,
                                     stream,
@@ -400,6 +427,46 @@ std::vector<DestDataType> launchSparseA(const std::string &kernelPath, hipStream
                                  ScalarType alpha, ScalarType beta, const ProfileSetting profile,
                                  float &timeElapsedMs) {
     hipModule_t module;
+    KernelArgs kArgs;
+    kArgs.addArg<uint32_t>(m);
+    kArgs.addArg<uint32_t>(n);
+    kArgs.addArg<uint32_t>(1);
+    kArgs.addArg<uint32_t>(k);
+
+    kArgs.addArg(d);
+    kArgs.addArg(c);
+    kArgs.addArg(a);
+    kArgs.addArg(b);
+    kArgs.addArg(metadata);
+
+    kArgs.addArg<uint32_t>(m);
+    kArgs.addArg<uint32_t>(m * n);
+    kArgs.addArg<uint32_t>(m);
+    kArgs.addArg<uint32_t>(m * n);
+    kArgs.addArg<uint32_t>(m);       //strideA0
+    kArgs.addArg<uint32_t>(m * k/2); //strideA1
+    kArgs.addArg<uint32_t>(k);     
+    kArgs.addArg<uint32_t>(k * n);
+    kArgs.addArg<uint32_t>(k/4);       //strideMetadata0 
+    kArgs.addArg<uint32_t>(k/4 * m);   //strideMetadata1 
+
+    kArgs.addArg(alpha);
+    kArgs.addArg(beta);
+    kArgs.addArg<uint32_t>(1);               //gsu
+
+    kArgs.alignTo(8);
+    size_t argSize = kArgs.data.size();
+
+    //kArgs.printArg();
+
+    void *launchArgs[] = {
+        HIP_LAUNCH_PARAM_BUFFER_POINTER,
+        kArgs.rawData(),
+        HIP_LAUNCH_PARAM_BUFFER_SIZE,
+        &argSize,
+        HIP_LAUNCH_PARAM_END
+    };
+
     if(exist_test(kernelPath))
     {
         auto err = hipModuleLoad(&module, kernelPath.c_str());
@@ -408,73 +475,39 @@ std::vector<DestDataType> launchSparseA(const std::string &kernelPath, hipStream
         //err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HHS_BH_SPA_MT64x64x64_MI16x16x1_SN_GSU1_K1_MIWT2_2");
         err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HSS_BH_SPA_MT16x16x64_MI16x16x1_SN_GSU1_K1_MIWT1_1");
         assert(!err && "Unable to get function");
-        KernelArgs kArgs;
-        kArgs.addArg(m);
-        kArgs.addArg(n);
-        kArgs.addArg(1);
-        kArgs.addArg(k);
-
-        kArgs.addArg(d);
-        kArgs.addArg(c);
-        kArgs.addArg(a);
-        kArgs.addArg(b);
-        kArgs.addArg(metadata);
-
-        kArgs.addArg<uint32_t>(m);
-        kArgs.addArg<uint32_t>(m * n);
-        kArgs.addArg<uint32_t>(m);
-        kArgs.addArg<uint32_t>(m * n);
-        kArgs.addArg<uint32_t>(m);       //strideA0
-        kArgs.addArg<uint32_t>(m * k/2); //strideA1
-        kArgs.addArg<uint32_t>(k);     
-        kArgs.addArg<uint32_t>(k * n);
-        kArgs.addArg<uint32_t>(k/4);       //strideMetadata0 
-        kArgs.addArg<uint32_t>(k/4 * m);   //strideMetadata1 
-
-        kArgs.addArg(alpha);
-        kArgs.addArg(beta);
-        kArgs.addArg<uint32_t>(1);               //gsu
-
-        kArgs.alignTo(8);
-        size_t argSize = kArgs.data.size();
-
-        void *launchArgs[] = {
-            HIP_LAUNCH_PARAM_BUFFER_POINTER,
-            kArgs.rawData(),
-            HIP_LAUNCH_PARAM_BUFFER_SIZE,
-            &argSize,
-            HIP_LAUNCH_PARAM_END
-        };
-
+        
         float totalTime{};
 
         for (size_t i = 0; i < profile.numRuns; ++i) {
             hipEvent_t endEvt;
             hipEvent_t startEvt;
-            err = hipEventCreate(&endEvt);
-            err = hipEventCreate(&startEvt);
-            err = hipEventRecord(startEvt, stream);
-            err = hipExtModuleLaunchKernel(kernelFunc, 
-                                        WORKGROUP_SIZE * m / MT0, 1, 1,
+            std::cout <<"....profile "<<i<<std::endl;
+            DEBUG_LOG("global size:%d,%d,%d\n",WORKGROUP_SIZE * m / MT0, n / MT1, 1);
+            DEBUG_LOG("local size:%d,%d,%d\n",WORKGROUP_SIZE, 1, 1);
+            CHECK(hipEventCreate(&endEvt));
+            CHECK(hipEventCreate(&startEvt));
+            CHECK(hipEventRecord(startEvt, stream));
+            CHECK(hipExtModuleLaunchKernel(kernelFunc, 
+                                        WORKGROUP_SIZE * m / MT0, n / MT1, 1,
                                         WORKGROUP_SIZE, 1, 1,
-                                        31744,
+                                        12800,
                                         stream,
                                         nullptr,
                                         &launchArgs[0],
                                         nullptr,
-                                        nullptr);
-            err = hipEventRecord(endEvt, stream);
-            err = hipEventSynchronize(endEvt);
-            err = hipStreamSynchronize(stream);
+                                        nullptr));
+            CHECK(hipEventRecord(endEvt, stream));
+            CHECK(hipEventSynchronize(endEvt));
+            CHECK(hipStreamSynchronize(stream));
             float t{};
-            err = hipEventElapsedTime(&t, startEvt, endEvt);
-            err = hipEventDestroy(endEvt);
-            err = hipEventDestroy(startEvt);
+            CHECK(hipEventElapsedTime(&t, startEvt, endEvt));
+            CHECK(hipEventDestroy(endEvt));
+            CHECK(hipEventDestroy(startEvt));
             totalTime += t;
         }
         timeElapsedMs = totalTime / profile.numRuns;
         std::cout << profile.opName << " time elapsed: " << totalTime / profile.numRuns << " ms\n";
-        hipModuleUnload(module);
+        CHECK(hipModuleUnload(module));
         std::cout <<"....hipModuleUnload done"<<std::endl;
     }
     else
@@ -483,7 +516,7 @@ std::vector<DestDataType> launchSparseA(const std::string &kernelPath, hipStream
     }
 
     std::vector<DestDataType> buf(m * n);
-    hipMemcpyDtoH(buf.data(), d, m * n * sizeof(DestDataType));
+    CHECK(hipMemcpyDtoH(buf.data(), d, m * n * sizeof(DestDataType)));
     return buf;
     // std::vector<float> ret(m * n);
     // for(int i=0;i<m * n;i++)
@@ -528,7 +561,7 @@ int main(int argc, char **argv) {
     std::vector<float>   cpuMatA(m * k/2, .2f);
     std::vector<float>   cpuMatB(k * n, .3f);
     std::vector<float>   cpuMatC(m * n, 1.f);
-    std::vector<float>   cpuMatD(m * n, 1.f);
+    std::vector<float>   cpuMatD(m * n, 1.5987f);
     std::vector<uint8_t> cpuMatMeta(n * k/8, 0);
     auto randInitMat = [&randEng, &dist] (std::vector<float> &mat) {
         std::transform(begin(mat), end(mat), begin(mat), [&randEng, &dist](float v) {
@@ -551,11 +584,11 @@ int main(int argc, char **argv) {
     DestDataType *gpuMatC{};
     DestDataType *gpuMatD{};
     uint8_t *gpuMatMeta{};
-    err = hipMalloc(&gpuMatA, m * k/2 * sizeof(SrcDataType));
-    err = hipMalloc(&gpuMatB, k * n * sizeof(SrcDataType));
-    err = hipMalloc(&gpuMatC, m * n * sizeof(DestDataType));
-    err = hipMalloc(&gpuMatD, m * n * sizeof(DestDataType));
-    err = hipMalloc(&gpuMatMeta, m * k/8 * sizeof(uint8_t));
+    CHECK(hipMalloc(&gpuMatA, m * k/2 * sizeof(SrcDataType)));
+    CHECK(hipMalloc(&gpuMatB, k * n * sizeof(SrcDataType)));
+    CHECK(hipMalloc(&gpuMatC, m * n * sizeof(DestDataType)));
+    CHECK(hipMalloc(&gpuMatD, m * n * sizeof(DestDataType)));
+    CHECK(hipMalloc(&gpuMatMeta, m * k/8 * sizeof(uint8_t)));
     DEBUG_LOG("hipMalloc done....\n");
     castArray(matA, cpuMatA.data(), cpuMatA.size());
     DEBUG_LOG("matA[0] = 0x%08x\n", matA[0]);
@@ -563,12 +596,13 @@ int main(int argc, char **argv) {
     castArray(matC, cpuMatC.data(), cpuMatC.size());
     castArray(matMeta, cpuMatMeta.data(), cpuMatMeta.size());
     castArray(matD, cpuMatD.data(), cpuMatD.size());
+    DEBUG_LOG("matD[0] = 0x%08x\n", matD[0]);
     DEBUG_LOG("castArray done....\n");
-    err = hipMemcpyHtoD(gpuMatA, matA, cpuMatA.size() * sizeof(SrcDataType));
-    err = hipMemcpyHtoD(gpuMatB, matB, cpuMatB.size() * sizeof(SrcDataType));
-    err = hipMemcpyHtoD(gpuMatC, matC, cpuMatC.size() * sizeof(DestDataType));
-    err = hipMemcpyHtoD(gpuMatMeta, matMeta, cpuMatMeta.size() * sizeof(uint8_t));
-    err = hipMemcpyHtoD(gpuMatD, matD, cpuMatD.size() * sizeof(DestDataType));
+    CHECK(hipMemcpyHtoD(gpuMatA, matA, cpuMatA.size() * sizeof(SrcDataType)));
+    CHECK(hipMemcpyHtoD(gpuMatB, matB, cpuMatB.size() * sizeof(SrcDataType)));
+    CHECK(hipMemcpyHtoD(gpuMatC, matC, cpuMatC.size() * sizeof(DestDataType)));
+    CHECK(hipMemcpyHtoD(gpuMatMeta, matMeta, cpuMatMeta.size() * sizeof(uint8_t)));
+    CHECK(hipMemcpyHtoD(gpuMatD, matD, cpuMatD.size() * sizeof(DestDataType)));
     DEBUG_LOG("hipMemcpyHtoD done....\n");
     float alpha = 1.f;
     float beta = 0.f;
@@ -594,6 +628,18 @@ int main(int argc, char **argv) {
     auto cpuRef = runCpuSparseA(cpuMatA, cpuMatB, cpuMatC, cpuMatMeta, MatDesc({m, k/2}, false), MatDesc({k, n}, false), MatDesc({m, n}, false), MatDesc({k/8, n}, false), alpha, beta);
     DEBUG_LOG("runCpuSparseA end\n");
 
+
+#if 1
+    DEBUG_LOG("Print 32 element of VGPR:\n");
+    for (size_t i = 0; i < 32; ++i) {
+        auto gpuVal = (static_cast<float>(fusedResult[i]));
+        union {
+            float f;
+            uint32_t u;
+        } f2u = { .f = gpuVal };
+        DEBUG_LOG("%f, 0x%08x\n",f2u.f, f2u.u);
+    }
+#endif
     for (size_t i = 0; i < cpuRef.size(); ++i) {
         auto cpuVal = (static_cast<float>(cpuRef[i]));
         auto gpuVal = (static_cast<float>(fusedResult[i]));
