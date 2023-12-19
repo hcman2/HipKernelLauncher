@@ -9,17 +9,17 @@ else
     wave=64
 fi
 h=gfx1201
-if [ $wave -eq 32 ]; then
-/opt/rocm/llvm/bin/clang++ -x assembler -target amdgcn-amd-amdhsa -mcode-object-version=4 -mcpu=gfx1201 -mno-wavefrontsize64 -c -o $f.o $f.s
-else
-/opt/rocm/llvm/bin/clang++ -x assembler -target amdgcn-amd-amdhsa -mcode-object-version=4 -mcpu=gfx1201 -mwavefrontsize64 -c -o $f.o $f.s
-fi
+
+COMMAND="/opt/rocm/llvm/bin/clang++ -x assembler -target amdgcn-amd-amdhsa -mcode-object-version=4 -mcpu=gfx1201 -mno-wavefrontsize64 -g -c -o $f.o $f.s"
+$COMMAND
+
 /opt/rocm/llvm/bin/clang++ -target amdgcn-amd-amdhsa -o $f.co $f.o
+echo $COMMAND
 ERR=$?
 if [ $ERR -ne 0 ]
 then
     echo one
     exit $ERR
 fi
-cp $f.co ../../../library/${f}_$h.co
-mkdir -p ../../../asm_backup && cp $f.s ../../../asm_backup/$f.s
+#cp $f.co ../../../library/${f}_$h.co
+#mkdir -p ../../../asm_backup && cp $f.s ../../../asm_backup/$f.s

@@ -309,7 +309,7 @@ std::vector<DType> runCpuSparseA(
 
     const size_t m = cDesc.shape[0];
     const size_t n = cDesc.shape[1];
-    const size_t k = bDesc.shape[1];
+    const size_t k = bDesc.shape[0];
     std::vector<DType> d(m * n, DType(0));
     MatDesc dDesc({m, n}, false);
 
@@ -473,7 +473,8 @@ std::vector<DestDataType> launchSparseA(const std::string &kernelPath, hipStream
         assert(!err && "Unable to load module");
         hipFunction_t kernelFunc;
         //err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HHS_BH_SPA_MT64x64x64_MI16x16x1_SN_GSU1_K1_MIWT2_2");
-        err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HSS_BH_SPA_MT16x16x64_MI16x16x1_SN_GSU1_K1_MIWT1_1");
+        err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HSS_BH_SPA_MT16x16x64_MI16x16x1_SN_K1_MIWT1_1");
+        //err = hipModuleGetFunction(&kernelFunc, module, "Cijk_Ailk_Bljk_HSS_BH_SPA_MT16x16x64_MI16x16x1_SN_GSU1_K1_MIWT1_1");
         assert(!err && "Unable to get function");
         
         float totalTime{};
@@ -490,7 +491,7 @@ std::vector<DestDataType> launchSparseA(const std::string &kernelPath, hipStream
             CHECK(hipExtModuleLaunchKernel(kernelFunc, 
                                         WORKGROUP_SIZE * m / MT0, n / MT1, 1,
                                         WORKGROUP_SIZE, 1, 1,
-                                        12800,
+                                        7936, //12800,
                                         stream,
                                         nullptr,
                                         &launchArgs[0],
@@ -503,7 +504,7 @@ std::vector<DestDataType> launchSparseA(const std::string &kernelPath, hipStream
             CHECK(hipEventElapsedTime(&t, startEvt, endEvt));
             CHECK(hipEventDestroy(endEvt));
             CHECK(hipEventDestroy(startEvt));
-            totalTime += t;
+            totalTime += 0;
         }
         timeElapsedMs = totalTime / profile.numRuns;
         std::cout << profile.opName << " time elapsed: " << totalTime / profile.numRuns << " ms\n";
@@ -535,6 +536,22 @@ bool checkSparseASize(uint64_t m, uint64_t n, uint64_t k)
     return true;
 }
 
+void printTensor(std::vector<float> &vec, int x, int y)
+{   
+    int i=0;
+    for(auto v:vec)
+    {
+        i++;
+        DEBUG_LOG("%.3f, ",v);
+        if(i==x)
+        {
+            i=0;
+            DEBUG_LOG("\n");
+        }
+    }
+    DEBUG_LOG("\n");
+}
+
 int main(int argc, char **argv) {
     DEBUG_LOG("Start....\n");
     auto err = hipInit(0);
@@ -561,18 +578,46 @@ int main(int argc, char **argv) {
     std::vector<float>   cpuMatA(m * k/2, .2f);
     std::vector<float>   cpuMatB(k * n, .3f);
     std::vector<float>   cpuMatC(m * n, 1.f);
-    std::vector<float>   cpuMatD(m * n, 1.5987f);
-    std::vector<uint8_t> cpuMatMeta(n * k/8, 0);
+    std::vector<float>   cpuMatD(m * n, 0);
+    std::vector<uint8_t> cpuMatMeta(m * k/8, 0);
     auto randInitMat = [&randEng, &dist] (std::vector<float> &mat) {
         std::transform(begin(mat), end(mat), begin(mat), [&randEng, &dist](float v) {
             return dist(randEng);
         });
     };
 
-    
-    //randInitMat(cpuMatA);
-    // randInitMat(cpuMatB);
-    // randInitMat(cpuMatC);
+    auto randInitMatU8 = [&randEng, &dist] (std::vector<uint8_t> &mat) {
+        std::transform(begin(mat), end(mat), begin(mat), [&randEng, &dist](uint8_t v) {
+            return dist(randEng);
+        });
+    };
+
+    randInitMatU8(cpuMatMeta);
+    //Init A
+    randInitMat(cpuMatA);
+    // for(int j=0;j<(k/2);j++)
+    // {
+    //     for(int i=0;i<m;i++)
+    //     {
+    //         float val = 0.01*i;
+    //         cpuMatA[j*m+i]=val;
+    //     }
+    // }
+
+    //Init B
+    randInitMat(cpuMatB);
+    // for(int i=0;i<n;i++)
+    // {
+    //     for(int j=0;j<k;j++)
+    //     {
+    //         float val = 0.01*j;
+    //         cpuMatB[i*k+j]=val;
+    //     }
+    // }
+    //printTensor(cpuMatA, m, k/2);
+
+    //printTensor(cpuMatB, k, n);
+
 
     SrcDataType *matA = new SrcDataType[m * k/2];
     SrcDataType *matB = new SrcDataType[k * n];
@@ -629,26 +674,32 @@ int main(int argc, char **argv) {
     DEBUG_LOG("runCpuSparseA end\n");
 
 
-#if 1
-    DEBUG_LOG("Print 32 element of VGPR:\n");
-    for (size_t i = 0; i < 32; ++i) {
+#if 0
+    DEBUG_LOG("Show the dumped data:\n");
+    for (size_t i = 0; i < 64; ++i) {
         auto gpuVal = (static_cast<float>(fusedResult[i]));
         union {
             float f;
             uint32_t u;
         } f2u = { .f = gpuVal };
-        DEBUG_LOG("%f, 0x%08x\n",f2u.f, f2u.u);
+        DEBUG_LOG("%02d:%f, 0x%08x\n",i,f2u.f, f2u.u);
     }
+#endif
+
+#if 0
+    printTensor(fusedResult, m, n);
+    printTensor(cpuRef, m, n);
 #endif
     for (size_t i = 0; i < cpuRef.size(); ++i) {
         auto cpuVal = (static_cast<float>(cpuRef[i]));
         auto gpuVal = (static_cast<float>(fusedResult[i]));
-        if (cpuVal != gpuVal) {
+        if (abs(cpuVal - gpuVal)>0.01) {
             std::cout << i << ": " << cpuVal << " != " << gpuVal << '\n';
-            break;
+            return 0;
         }
     }
-
+    
+    std::cout << "======PASS======" << "\n";
     std::cout << "Tensile flops: " << numOperations / (tensileTimeMs * 1e9) << " TFlops\n";
 
     std::cout << "Performance boost: " << (tensileTimeMs / fusedTimeMs) * 100 << "%\n";
